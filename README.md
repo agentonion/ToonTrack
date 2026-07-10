@@ -1,8 +1,8 @@
 # ToonTrack
 
-A macOS menu bar app that tracks [Toontown Rewritten](https://www.toontownrewritten.com/) invasions and sends native notifications when cogs you care about start (and optionally when they end).
+A macOS menu bar app that tracks [Toontown Rewritten](https://www.toontownrewritten.com/) invasions and ToonHQ groups, with notifications when new invasions or groups appear.
 
-Active groups use ToonHQ's live groups API (`/api/groups/list/1/`) — the same endpoint their website polls every 12 seconds, so groups appear and disappear automatically.
+Uses TTR's official APIs for invasions and population, and ToonHQ's live groups API (`/api/groups/list/1/`).
 
 ## Quick start
 
@@ -14,27 +14,21 @@ pip install -r requirements.txt
 python3 toonhq_invasion_tracker.py
 ```
 
-Look for **🐹** in the menu bar. Click it to see active invasion count, refresh, pick which cogs notify you, and open ToonHQ pages.
+Or double-click **`Run ToonTrack.command`** in Finder.
 
 Settings are saved to `~/.toonhq_tracker/config.json`.
 
 ## Menu bar features
 
-- Live counts in the menu bar: `🐱 Active Groups (X) Active Invasion (X)`
-- **Active Invasions** submenu with suit type, cog name, time remaining, and progress
-- **Active Groups** submenu listing current ToonHQ groups
-- Groups auto-refresh every **12 seconds** (same as ToonHQ); invasions every **30 seconds**
-- **Group Notifications…** menu — uncheck a type (CJ, Beanfest, DA Office, etc.) to mute alerts for that type
-- Groups in an invaded district show `⚔️ Sellbot invasion (Two-Face)` in the list
-- Notifications when any new invasion or group appears (respecting group type mutes)
-- Toggle notification sounds
-- One-click links to ToonHQ Invasions and Groups pages
+- Live counts: `🐱 934 toons · Active Groups (X) Active Invasion (X)`
+- **Active Invasions** — suit type, cog name, time remaining, progress
+- **Active Groups** — filtered by your notification selections (or all with **Show All Groups**)
+- **Group Notifications…** — toggle types on/off, Select All, Unselect All
+- Groups refresh every **12 seconds**; invasions and population every **30 seconds**
+- Invasion tags on groups when their district is invaded
+- Notifications for new invasions and groups (respecting muted group types)
 
-Invasion ETAs use ToonHQ's computed defeat rate when available, with a local fallback estimate from TTR progress updates.
-
-## Build a double-clickable `.app` (optional)
-
-Uses [py2app](https://py2app.readthedocs.io/) so ToonTrack runs without a terminal and stays in the menu bar only (no Dock icon).
+## Build `ToonTrack.app`
 
 ```bash
 source .venv/bin/activate
@@ -42,19 +36,38 @@ pip install py2app
 python3 setup.py py2app
 ```
 
-The app bundle is created at `dist/ToonTrack.app`. Drag it to **Applications** (or anywhere you like) and double-click to launch.
+Output: `dist/ToonTrack.app` — drag to **Applications**.
 
-To rebuild after code changes:
+## Updating `ToonTrack.app` after code changes
+
+Whenever you change the Python code, rebuild and replace the app:
+
+1. **Quit ToonTrack** (menu bar 🐱 → quit, or Activity Monitor)
+2. In Terminal:
 
 ```bash
+cd /Users/user/Desktop/Apps/ToonTrack
+source .venv/bin/activate
 rm -rf build dist
 python3 setup.py py2app
 ```
 
+3. Replace the old copy:
+
+```bash
+cp -R dist/ToonTrack.app /Applications/ToonTrack.app
+```
+
+Or drag the new `dist/ToonTrack.app` onto **Applications** and choose **Replace**.
+
+4. Re-open **ToonTrack** from Applications.
+
+Your settings in `~/.toonhq_tracker/config.json` are kept between rebuilds.
+
 ## Permissions
 
-On first launch, macOS may ask you to allow **Notifications** for ToonTrack (or Terminal/Python if running from the command line). Enable them in **System Settings → Notifications** if you want alerts.
+Allow **Notifications** in **System Settings → Notifications** if you want alerts.
 
 ## Unofficial fan tool
 
-Not affiliated with Toontown Rewritten or ToonHQ. Uses only TTR's public invasions endpoint.
+Not affiliated with Toontown Rewritten or ToonHQ.

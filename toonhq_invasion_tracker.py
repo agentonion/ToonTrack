@@ -20,6 +20,7 @@ import requests
 import rumps
 
 API_URL = "https://www.toontownrewritten.com/api/invasions"
+POPULATION_URL = "https://www.toontownrewritten.com/api/population"
 TOONHQ_INVASIONS_URL = "https://toonhq.org/invasions/"
 TOONHQ_GROUPS_LIST_URL = "https://toonhq.org/api/groups/list/1/"
 TOONHQ_GROUPS_CORE_URL = "https://toonhq.org/api/groups/core_data/1/"
@@ -143,6 +144,16 @@ def group_types_from_core(core_data: dict) -> list[str]:
     })
 
 
+def fetch_population() -> int | None:
+    """Return total toons online from TTR's public population API."""
+    resp = requests.get(POPULATION_URL, timeout=10, headers=JSON_HEADERS)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("error"):
+        return None
+    return data.get("totalPopulation")
+
+
 def fetch_toonhq_state(url: str) -> dict:
     resp = requests.get(url, timeout=15, headers={"User-Agent": USER_AGENT})
     resp.raise_for_status()
@@ -251,6 +262,7 @@ class InvasionTrackerApp(rumps.App):
         self.invasion_display = []
         self.invasion_count = 0
         self.group_count = 0
+        self.online_population = None
         self.groups_core_data = None
         self.known_group_types = []
         self.group_type_items = {}
@@ -432,8 +444,10 @@ class InvasionTrackerApp(rumps.App):
         )
 
     def refresh_title_and_sections(self):
+        online = f"{self.online_population} toons · " if self.online_population is not None else ""
         self.title = (
-            f"{MENU_EMOJI} Active Groups ({self.group_count}) "
+            f"{MENU_EMOJI} {online}"
+            f"Active Groups ({self.group_count}) "
             f"Active Invasion ({self.invasion_count})"
         )
         self.menu["Active Invasions"].title = f"Active Invasions ({self.invasion_count})"
@@ -444,6 +458,11 @@ class InvasionTrackerApp(rumps.App):
     def poll_groups(self, *_):
         group_error = None
         groups = []
+
+        try:
+            self.online_population = fetch_population()
+        except requests.RequestException:
+            pass
 
         try:
             groups, self.groups_core_data = fetch_live_groups(self.groups_core_data)
@@ -484,8 +503,14 @@ class InvasionTrackerApp(rumps.App):
 
     def poll_invasions(self, *_):
         invasion_error = None
+        population_error = None
         invasions_raw = {}
         toonhq_invasions = {}
+
+        try:
+            self.online_population = fetch_population()
+        except requests.RequestException:
+            population_error = True
 
         try:
             resp = requests.get(API_URL, timeout=10, headers={"User-Agent": USER_AGENT})
@@ -565,8 +590,12 @@ class InvasionTrackerApp(rumps.App):
         }
 
         status_parts = [f"Updated {time.strftime('%I:%M:%S %p')}"]
+        if self.online_population is not None:
+            status_parts.insert(0, f"{self.online_population:,} toons online")
+        elif population_error:
+            status_parts.insert(0, "population unavailable")
         if invasion_error:
-            status_parts.insert(0, f"unavailable ({invasion_error})")
+            status_parts.insert(0, f"invasions unavailable ({invasion_error})")
 
         self.update_invasions_menu(" · ".join(status_parts), invasion_display)
 
