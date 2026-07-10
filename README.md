@@ -34,6 +34,7 @@ Settings are saved to `~/.toonhq_tracker/config.json`.
 ```bash
 source .venv/bin/activate
 pip install py2app
+python3 build_icon.py
 python3 setup.py py2app
 ```
 
