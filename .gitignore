@@ -4,6 +4,5 @@ __pycache__/
 venv/
 dist/
 build/
-ToonTrack.iconset/
 *.egg-info/
 .DS_Store

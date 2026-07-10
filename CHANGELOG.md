@@ -2,10 +2,15 @@
 
 All notable changes to ToonTrack are documented here.
 
+## [1.2.2] — 2026-07-10
+
+### Changed
+- Reverted custom app icon; restored default py2app bundle icon
+
 ## [1.2.1] — 2026-07-10
 
 ### Changed
-- App icon updated to 👀 (matches menu bar emoji; replaces default Python icon)
+- ~~App icon updated to 👀~~ (reverted in v1.2.2)
 
 ## [1.2.0] — 2026-07-10
 
