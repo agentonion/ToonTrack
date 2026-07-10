@@ -15,5 +15,5 @@ echo "Installing to /Applications/ToonTrack.app…"
 rm -rf /Applications/ToonTrack.app
 cp -R dist/ToonTrack.app /Applications/ToonTrack.app
 
-echo "Done. Launching ToonTrack v1.1.2…"
+echo "Done. Launching ToonTrack v1.2.0…"
 open /Applications/ToonTrack.app

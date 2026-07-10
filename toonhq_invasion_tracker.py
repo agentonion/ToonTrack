@@ -49,8 +49,10 @@ CONFIG_PATH = Path.home() / ".toonhq_tracker" / "config.json"
 GROUPS_POLL_INTERVAL = 12
 INVASIONS_POLL_INTERVAL = 30
 USER_AGENT = "ToonTrack/1.0 (macOS menu bar invasion & group tracker)"
-MENU_EMOJI = "🐱"
+MENU_EMOJI = "👀"
 GROUP_NOTIFICATIONS_MENU = "Group Notifications…"
+INVASIONS_MENU = "Invasions"
+GROUPS_MENU = "Groups"
 MENU_ROW_HEIGHT = 22
 MENU_ROW_WIDTH = 260
 MENU_TRACKING_OPTIONS = (
@@ -477,6 +479,15 @@ class LabelMenuItem:
         self._menuitem = NSMenuItem.alloc().init()
         attach_view_menu_item(self._menuitem, self._view, title)
 
+    @objc.python_method
+    def set_title(self, title):
+        self.title = title
+        self._view._title = title
+        width = menu_row_width_for_title(title)
+        self._view.setFrameSize_((width, MENU_ROW_HEIGHT))
+        self._menuitem.setTitle_(title)
+        self._view.setNeedsDisplay_(True)
+
 
 def attach_view_menu_item(menuitem, view, title):
     menuitem.setView_(view)
@@ -538,11 +549,19 @@ class InvasionTrackerApp(rumps.App):
         self.show_all_item = None
         self.invasions_by_district = {}
         self.all_groups_count = 0
+        self.population_unavailable = False
+        self.last_updated = None
+        self.invasion_error = None
         self.group_type_menu = self.build_group_type_menu()
 
+        self.population_item = rumps.MenuItem("Checking toons online…", callback=None)
+        self.updated_item = rumps.MenuItem("Updated —", callback=None)
         self.menu = [
-            ("Active Invasions", ["Checking…"]),
-            ("Active Groups", ["Checking…"]),
+            self.population_item,
+            self.updated_item,
+            None,
+            (INVASIONS_MENU, ["Checking…"]),
+            (GROUPS_MENU, ["Checking…"]),
             None,
             rumps.MenuItem("Refresh Now", callback=self.manual_refresh),
             None,
@@ -661,7 +680,7 @@ class InvasionTrackerApp(rumps.App):
         self.schedule_redisplay_groups()
 
     def schedule_redisplay_groups(self):
-        """Update Active Groups after the menu finishes handling the click."""
+        """Update Groups after the menu finishes handling the click."""
         callAfter(self.redisplay_groups)
 
     def group_notifications_enabled(self, type_name: str) -> bool:
@@ -690,18 +709,47 @@ class InvasionTrackerApp(rumps.App):
 
     # ---------- display helpers ----------
 
-    def update_invasions_menu(self, status_line: str, invasions: list[dict]):
-        submenu = self.menu["Active Invasions"]
+    def update_status_menu(self):
+        if self.online_population is not None:
+            self.population_item.title = f"{self.online_population:,} toons online"
+        elif self.population_unavailable:
+            self.population_item.title = "Toons online unavailable"
+        else:
+            self.population_item.title = "Checking toons online…"
+
+        if self.last_updated:
+            self.updated_item.title = f"Updated {self.last_updated}"
+        else:
+            self.updated_item.title = "Updated —"
+
+    def menu_bar_online(self) -> str:
+        if self.online_population is not None:
+            return f"{self.online_population:,} toons online · "
+        return ""
+
+    def refresh_title_and_sections(self):
+        self.update_status_menu()
+        self.title = (
+            f"{MENU_EMOJI} {self.menu_bar_online()}"
+            f"Groups ({self.group_count}) "
+            f"Invasion ({self.invasion_count})"
+        )
+        self.menu[INVASIONS_MENU].title = f"Invasions ({self.invasion_count})"
+        self.menu[GROUPS_MENU].title = f"Groups ({self.group_count})"
+
+    def update_invasions_menu(self, invasions: list[dict], invasion_error: str | None = None):
+        submenu = self.menu[INVASIONS_MENU]
         submenu.clear()
-        items = [LabelMenuItem(status_line)]
-        if invasions:
-            items.append(None)
-            items.extend(LabelMenuItem(format_invasion_line(inv)) for inv in invasions)
-        submenu.update(items)
+        if invasion_error:
+            submenu.update([LabelMenuItem(f"Unavailable ({invasion_error})")])
+        elif invasions:
+            submenu.update(LabelMenuItem(format_invasion_line(inv)) for inv in invasions)
+        else:
+            submenu.update([LabelMenuItem("(none active)")])
         expand_view_menu_items(submenu)
 
     def update_groups_menu(self, groups: list[dict], group_error: str | None):
-        submenu = self.menu["Active Groups"]
+        submenu = self.menu[GROUPS_MENU]
         submenu.clear()
 
         if group_error:
@@ -726,16 +774,6 @@ class InvasionTrackerApp(rumps.App):
         )
         expand_view_menu_items(submenu)
 
-    def refresh_title_and_sections(self):
-        online = f"{self.online_population} toons · " if self.online_population is not None else ""
-        self.title = (
-            f"{MENU_EMOJI} {online}"
-            f"Active Groups ({self.group_count}) "
-            f"Active Invasion ({self.invasion_count})"
-        )
-        self.menu["Active Invasions"].title = f"Active Invasions ({self.invasion_count})"
-        self.menu["Active Groups"].title = f"Active Groups ({self.group_count})"
-
     # ---------- polling ----------
 
     def poll_groups(self, *_):
@@ -744,8 +782,9 @@ class InvasionTrackerApp(rumps.App):
 
         try:
             self.online_population = fetch_population()
+            self.population_unavailable = False
         except requests.RequestException:
-            pass
+            self.population_unavailable = True
 
         try:
             groups, self.groups_core_data = fetch_live_groups(self.groups_core_data)
@@ -782,18 +821,22 @@ class InvasionTrackerApp(rumps.App):
         if not group_error:
             self.refresh_title_and_sections()
         elif self.invasion_count:
-            self.title = f"{MENU_EMOJI} Active Groups (?) Active Invasion ({self.invasion_count})"
+            self.update_status_menu()
+            self.title = (
+                f"{MENU_EMOJI} {self.menu_bar_online()}"
+                f"Groups (?) Invasion ({self.invasion_count})"
+            )
 
     def poll_invasions(self, *_):
         invasion_error = None
-        population_error = None
         invasions_raw = {}
         toonhq_invasions = {}
 
         try:
             self.online_population = fetch_population()
+            self.population_unavailable = False
         except requests.RequestException:
-            population_error = True
+            self.population_unavailable = True
 
         try:
             resp = requests.get(API_URL, timeout=10, headers={"User-Agent": USER_AGENT})
@@ -872,15 +915,10 @@ class InvasionTrackerApp(rumps.App):
             inv["district"]: inv for inv in invasion_display
         }
 
-        status_parts = [f"Updated {time.strftime('%I:%M:%S %p')}"]
-        if self.online_population is not None:
-            status_parts.insert(0, f"{self.online_population:,} toons online")
-        elif population_error:
-            status_parts.insert(0, "population unavailable")
-        if invasion_error:
-            status_parts.insert(0, f"invasions unavailable ({invasion_error})")
+        self.invasion_error = invasion_error
+        self.last_updated = time.strftime("%I:%M:%S %p")
 
-        self.update_invasions_menu(" · ".join(status_parts), invasion_display)
+        self.update_invasions_menu(invasion_display, invasion_error)
 
         # Refresh group lines so invasion tags stay in sync with districts.
         if self.active_groups and not invasion_error:
@@ -888,6 +926,7 @@ class InvasionTrackerApp(rumps.App):
             self.update_groups_menu(groups, None)
 
         if invasion_error and not self.group_count:
+            self.update_status_menu()
             self.title = f"{MENU_EMOJI} ⚠️"
         else:
             self.refresh_title_and_sections()

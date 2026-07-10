@@ -20,9 +20,10 @@ Settings are saved to `~/.toonhq_tracker/config.json`.
 
 ## Menu bar features
 
-- Live counts: `🐱 934 toons · Active Groups (X) Active Invasion (X)`
-- **Active Invasions** — suit type, cog name, time remaining, progress
-- **Active Groups** — filtered by your notification selections (or all with **Show All Groups**)
+- Live counts: `👀 934 toons online · Groups (X) Invasion (X)`
+- **Toons online** and **Updated** status rows at the top of the menu
+- **Invasions** — suit type, cog name, time remaining, progress
+- **Groups** — filtered by your notification selections (or all with **Show All Groups**)
 - **Group Notifications…** — toggle types on/off, Select All, Unselect All
 - Groups refresh every **12 seconds**; invasions and population every **30 seconds**
 - Invasion tags on groups when their district is invaded
@@ -42,7 +43,7 @@ Output: `dist/ToonTrack.app` — drag to **Applications**.
 
 Whenever you change the Python code, rebuild and replace the app:
 
-1. **Quit ToonTrack** (menu bar 🐱 → quit, or Activity Monitor)
+1. **Quit ToonTrack** (menu bar 👀 → quit, or Activity Monitor)
 2. In Terminal:
 
 ```bash
