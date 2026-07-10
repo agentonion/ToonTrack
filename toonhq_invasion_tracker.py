@@ -16,8 +16,20 @@ import re
 import time
 from pathlib import Path
 
+import objc
 import requests
 import rumps
+from AppKit import (
+    NSColor,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSMakeRect,
+    NSMenuItem,
+    NSView,
+)
+from Foundation import NSString
+from PyObjCTools.AppHelper import callAfter
 
 API_URL = "https://www.toontownrewritten.com/api/invasions"
 POPULATION_URL = "https://www.toontownrewritten.com/api/population"
@@ -30,6 +42,9 @@ GROUPS_POLL_INTERVAL = 12
 INVASIONS_POLL_INTERVAL = 30
 USER_AGENT = "ToonTrack/1.0 (macOS menu bar invasion & group tracker)"
 MENU_EMOJI = "🐱"
+GROUP_NOTIFICATIONS_MENU = "Group Notifications…"
+MENU_ROW_HEIGHT = 22
+MENU_ROW_WIDTH = 260
 JSON_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json",
@@ -239,6 +254,144 @@ def format_invasion_line(inv: dict) -> str:
     )
 
 
+def menu_text_attrs(font, color):
+    return {
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: color,
+    }
+
+
+class CheckboxRowView(NSView):
+    """Clickable checkbox row; unlike standard NSMenuItem actions, this keeps the menu open."""
+
+    def initWithFrame_title_checked_handler_(self, frame, title, checked, handler):
+        self = objc.super(CheckboxRowView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._title = title
+        self._checked = bool(checked)
+        self._handler = handler
+        return self
+
+    def acceptsFirstMouse_(self, event):
+        return True
+
+    def isFlipped(self):
+        return True
+
+    def mouseUp_(self, event):
+        self._checked = not self._checked
+        self.setNeedsDisplay_(True)
+        if self._handler:
+            self._handler(self._checked)
+
+    @objc.python_method
+    def set_checked(self, checked):
+        self._checked = bool(checked)
+        self.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def is_checked(self):
+        return self._checked
+
+    def drawRect_(self, rect):
+        font = NSFont.menuFontOfSize_(0)
+        try:
+            color = NSColor.labelColor()
+        except AttributeError:
+            color = NSColor.controlTextColor()
+        attrs = menu_text_attrs(font, color)
+        if self._checked:
+            mark_attrs = dict(attrs)
+            mark_attrs[NSFontAttributeName] = NSFont.boldSystemFontOfSize_(font.pointSize())
+            NSString.stringWithString_("✓").drawAtPoint_withAttributes_((8, 2), mark_attrs)
+        NSString.stringWithString_(self._title).drawAtPoint_withAttributes_((28, 2), attrs)
+
+
+class ActionRowView(NSView):
+    """Clickable menu row that does not dismiss the parent menu."""
+
+    def initWithFrame_title_handler_(self, frame, title, handler):
+        self = objc.super(ActionRowView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._title = title
+        self._handler = handler
+        return self
+
+    def acceptsFirstMouse_(self, event):
+        return True
+
+    def isFlipped(self):
+        return True
+
+    def mouseUp_(self, event):
+        if self._handler:
+            self._handler()
+
+    def drawRect_(self, rect):
+        font = NSFont.menuFontOfSize_(0)
+        try:
+            color = NSColor.labelColor()
+        except AttributeError:
+            color = NSColor.controlTextColor()
+        NSString.stringWithString_(self._title).drawAtPoint_withAttributes_(
+            (28, 2), menu_text_attrs(font, color)
+        )
+
+
+class CheckboxMenuItem:
+    """View-based menu item with a checkmark; stays open while toggling."""
+
+    def __init__(self, title, checked=False, callback=None):
+        self.title = title
+        self._callback = callback
+        frame = NSMakeRect(0, 0, MENU_ROW_WIDTH, MENU_ROW_HEIGHT)
+        self._view = CheckboxRowView.alloc().initWithFrame_title_checked_handler_(
+            frame, title, checked, self._on_toggle if callback else None
+        )
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setView_(self._view)
+
+    @objc.python_method
+    def _on_toggle(self, checked):
+        if self._callback:
+            self._callback(self, checked)
+
+    @property
+    def state(self):
+        return self._view.is_checked()
+
+    @state.setter
+    def state(self, value):
+        self._view.set_checked(value)
+
+
+class ActionMenuItem:
+    """View-based menu action row; stays open after clicking."""
+
+    def __init__(self, title, callback=None):
+        self.title = title
+        frame = NSMakeRect(0, 0, MENU_ROW_WIDTH, MENU_ROW_HEIGHT)
+        self._view = ActionRowView.alloc().initWithFrame_title_handler_(
+            frame, title, callback
+        )
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setView_(self._view)
+
+
+def expand_view_menu_items(submenu):
+    """Stretch custom row views to the submenu width."""
+    menu = submenu._menu
+    width = max(menu.size().width, MENU_ROW_WIDTH)
+    for ns_item in menu.itemArray():
+        view = ns_item.view()
+        if view is None:
+            continue
+        height = view.frame().size.height
+        view.setFrameSize_((width, height))
+
+
 def format_group_line(group: dict, invasions_by_district: dict[str, dict]) -> str:
     note = f' · "{group["note"][:40]}"' if group["note"] else ""
     invasion = invasions_by_district.get(group["district"])
@@ -266,6 +419,7 @@ class InvasionTrackerApp(rumps.App):
         self.groups_core_data = None
         self.known_group_types = []
         self.group_type_items = {}
+        self.show_all_item = None
         self.invasions_by_district = {}
         self.all_groups_count = 0
         self.group_type_menu = self.build_group_type_menu()
@@ -276,7 +430,7 @@ class InvasionTrackerApp(rumps.App):
             None,
             rumps.MenuItem("Refresh Now", callback=self.manual_refresh),
             None,
-            ("Group Notifications…", self.group_type_menu),
+            (GROUP_NOTIFICATIONS_MENU, self.group_type_menu),
             rumps.MenuItem("Play Sound With Notifications", callback=self.toggle_sound),
         ]
         self.menu["Play Sound With Notifications"].state = self.config["play_sound"]
@@ -299,13 +453,16 @@ class InvasionTrackerApp(rumps.App):
 
     def build_group_type_menu(self):
         show_all = self.config.get("show_all_groups", False)
-        show_all_item = rumps.MenuItem("Show All Groups", callback=self.on_show_all_groups)
-        show_all_item.state = show_all
+        self.show_all_item = CheckboxMenuItem(
+            "Show All Groups",
+            checked=show_all,
+            callback=self.on_show_all_changed,
+        )
         return [
-            show_all_item,
+            self.show_all_item,
             None,
-            rumps.MenuItem("Select All", callback=self.select_all_group_types),
-            rumps.MenuItem("Unselect All", callback=self.unselect_all_group_types),
+            ActionMenuItem("Select All", callback=self.select_all_group_types),
+            ActionMenuItem("Unselect All", callback=self.unselect_all_group_types),
             None,
             rumps.MenuItem("(loads on first refresh)", callback=None),
         ]
@@ -313,75 +470,79 @@ class InvasionTrackerApp(rumps.App):
     def rebuild_group_type_menu(self):
         muted = set(self.config.get("muted_group_types") or [])
         show_all = self.config.get("show_all_groups", False)
-        submenu = self.menu["Group Notifications…"]
+        submenu = self.menu[GROUP_NOTIFICATIONS_MENU]
         submenu.clear()
 
-        show_all_item = rumps.MenuItem("Show All Groups", callback=self.on_show_all_groups)
-        show_all_item.state = show_all
+        self.show_all_item = CheckboxMenuItem(
+            "Show All Groups",
+            checked=show_all,
+            callback=self.on_show_all_changed,
+        )
 
         items = [
-            show_all_item,
+            self.show_all_item,
             None,
-            rumps.MenuItem("Select All", callback=self.select_all_group_types),
-            rumps.MenuItem("Unselect All", callback=self.unselect_all_group_types),
+            ActionMenuItem("Select All", callback=self.select_all_group_types),
+            ActionMenuItem("Unselect All", callback=self.unselect_all_group_types),
             None,
         ]
         self.group_type_items = {}
         for type_name in self.known_group_types:
-            item = rumps.MenuItem(type_name, callback=self.make_group_type_toggle(type_name))
-            item.state = type_name not in muted
+            item = CheckboxMenuItem(
+                type_name,
+                checked=type_name not in muted,
+                callback=self.make_group_type_changed(type_name),
+            )
             self.group_type_items[type_name] = item
             items.append(item)
 
         submenu.update(items)
+        expand_view_menu_items(submenu)
         self.group_type_menu = items
 
-    def make_group_type_toggle(self, type_name):
-        def _toggle(sender):
-            self.toggle_group_type(type_name)
-            sender.state = self.group_notifications_enabled(type_name)
-        return _toggle
+    def make_group_type_changed(self, type_name):
+        def _changed(_item, checked):
+            self.on_group_type_changed(type_name, checked)
+        return _changed
 
-    def on_show_all_groups(self, sender):
-        self.toggle_show_all_groups()
-        sender.state = self.config.get("show_all_groups", False)
-
-    def refresh_group_type_checkmarks(self):
+    def on_group_type_changed(self, type_name: str, checked: bool):
         muted = set(self.config.get("muted_group_types") or [])
-        show_all = self.config.get("show_all_groups", False)
-        if "Show All Groups" in self.menu["Group Notifications…"]:
-            self.menu["Group Notifications…"]["Show All Groups"].state = show_all
-        for type_name, item in self.group_type_items.items():
-            item.state = type_name not in muted
-
-    def toggle_group_type(self, type_name: str):
-        muted = set(self.config.get("muted_group_types") or [])
-        if type_name in muted:
+        if checked:
             muted.discard(type_name)
         else:
             muted.add(type_name)
         self.config["muted_group_types"] = sorted(muted)
         save_config(self.config)
-        self.refresh_group_type_checkmarks()
-        self.redisplay_groups()
+        self.schedule_redisplay_groups()
 
-    def toggle_show_all_groups(self):
-        self.config["show_all_groups"] = not self.config.get("show_all_groups", False)
+    def on_show_all_changed(self, _item, checked: bool):
+        self.config["show_all_groups"] = checked
         save_config(self.config)
-        self.refresh_group_type_checkmarks()
-        self.redisplay_groups()
+        self.schedule_redisplay_groups()
 
-    def select_all_group_types(self, sender):
+    def refresh_group_type_checkmarks(self):
+        muted = set(self.config.get("muted_group_types") or [])
+        show_all = self.config.get("show_all_groups", False)
+        if self.show_all_item is not None:
+            self.show_all_item.state = show_all
+        for type_name, item in self.group_type_items.items():
+            item.state = type_name not in muted
+
+    def select_all_group_types(self, _sender=None):
         self.config["muted_group_types"] = []
         save_config(self.config)
         self.refresh_group_type_checkmarks()
-        self.redisplay_groups()
+        self.schedule_redisplay_groups()
 
-    def unselect_all_group_types(self, sender):
+    def unselect_all_group_types(self, _sender=None):
         self.config["muted_group_types"] = self.known_group_types[:]
         save_config(self.config)
         self.refresh_group_type_checkmarks()
-        self.redisplay_groups()
+        self.schedule_redisplay_groups()
+
+    def schedule_redisplay_groups(self):
+        """Update Active Groups after the menu finishes handling the click."""
+        callAfter(self.redisplay_groups)
 
     def group_notifications_enabled(self, type_name: str) -> bool:
         return type_name not in set(self.config.get("muted_group_types") or [])
