@@ -49,9 +49,19 @@ Whenever you change the Python code, rebuild and replace the app:
 
 ```bash
 cd /Users/user/Desktop/Apps/ToonTrack
+./Install\ ToonTrack.command
+```
+
+Or manually:
+
+```bash
+cd /Users/user/Desktop/Apps/ToonTrack
 source .venv/bin/activate
+python3 build_icon.py
+find build dist -mindepth 1 -delete 2>/dev/null || true
 rm -rf build dist
 python3 setup.py py2app
+cp -R dist/ToonTrack.app /Applications/ToonTrack.app
 ```
 
 3. Replace the old copy:
