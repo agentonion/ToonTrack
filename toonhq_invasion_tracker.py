@@ -20,12 +20,18 @@ import objc
 import requests
 import rumps
 from AppKit import (
+    NSBezierPath,
     NSColor,
     NSFont,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
     NSMakeRect,
     NSMenuItem,
+    NSTrackingActiveInActiveApp,
+    NSTrackingArea,
+    NSTrackingEnabledDuringMouseDrag,
+    NSTrackingInVisibleRect,
+    NSTrackingMouseEnteredAndExited,
     NSView,
 )
 from Foundation import NSString
@@ -45,6 +51,12 @@ MENU_EMOJI = "🐱"
 GROUP_NOTIFICATIONS_MENU = "Group Notifications…"
 MENU_ROW_HEIGHT = 22
 MENU_ROW_WIDTH = 260
+MENU_TRACKING_OPTIONS = (
+    NSTrackingMouseEnteredAndExited
+    | NSTrackingActiveInActiveApp
+    | NSTrackingInVisibleRect
+    | NSTrackingEnabledDuringMouseDrag
+)
 JSON_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json",
@@ -261,7 +273,65 @@ def menu_text_attrs(font, color):
     }
 
 
-class CheckboxRowView(NSView):
+def menu_label_color(highlighted):
+    if highlighted:
+        try:
+            return NSColor.selectedMenuItemTextColor()
+        except AttributeError:
+            return NSColor.alternateSelectedControlTextColor()
+    try:
+        return NSColor.labelColor()
+    except AttributeError:
+        return NSColor.controlTextColor()
+
+
+class MenuRowView(NSView):
+    """Base row view with standard menu-item hover highlighting."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(MenuRowView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._highlighted = False
+        return self
+
+    def acceptsFirstMouse_(self, event):
+        return True
+
+    def isFlipped(self):
+        return True
+
+    def updateTrackingAreas(self):
+        objc.super(MenuRowView, self).updateTrackingAreas()
+        for area in self.trackingAreas():
+            self.removeTrackingArea_(area)
+        self.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                self.bounds(), MENU_TRACKING_OPTIONS, self, None
+            )
+        )
+
+    def mouseEntered_(self, event):
+        self._highlighted = True
+        self.setNeedsDisplay_(True)
+
+    def mouseExited_(self, event):
+        self._highlighted = False
+        self.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def _draw_highlight(self, rect):
+        if not self._highlighted:
+            return
+        try:
+            color = NSColor.selectedContentBackgroundColor()
+        except AttributeError:
+            color = NSColor.selectedMenuItemColor()
+        color.setFill()
+        NSBezierPath.fillRect_(rect)
+
+
+class CheckboxRowView(MenuRowView):
     """Clickable checkbox row; unlike standard NSMenuItem actions, this keeps the menu open."""
 
     def initWithFrame_title_checked_handler_(self, frame, title, checked, handler):
@@ -272,12 +342,6 @@ class CheckboxRowView(NSView):
         self._checked = bool(checked)
         self._handler = handler
         return self
-
-    def acceptsFirstMouse_(self, event):
-        return True
-
-    def isFlipped(self):
-        return True
 
     def mouseUp_(self, event):
         self._checked = not self._checked
@@ -295,11 +359,9 @@ class CheckboxRowView(NSView):
         return self._checked
 
     def drawRect_(self, rect):
+        self._draw_highlight(rect)
         font = NSFont.menuFontOfSize_(0)
-        try:
-            color = NSColor.labelColor()
-        except AttributeError:
-            color = NSColor.controlTextColor()
+        color = menu_label_color(self._highlighted)
         attrs = menu_text_attrs(font, color)
         if self._checked:
             mark_attrs = dict(attrs)
@@ -308,7 +370,7 @@ class CheckboxRowView(NSView):
         NSString.stringWithString_(self._title).drawAtPoint_withAttributes_((28, 2), attrs)
 
 
-class ActionRowView(NSView):
+class ActionRowView(MenuRowView):
     """Clickable menu row that does not dismiss the parent menu."""
 
     def initWithFrame_title_handler_(self, frame, title, handler):
@@ -319,24 +381,35 @@ class ActionRowView(NSView):
         self._handler = handler
         return self
 
-    def acceptsFirstMouse_(self, event):
-        return True
-
-    def isFlipped(self):
-        return True
-
     def mouseUp_(self, event):
         if self._handler:
             self._handler()
 
     def drawRect_(self, rect):
+        self._draw_highlight(rect)
         font = NSFont.menuFontOfSize_(0)
-        try:
-            color = NSColor.labelColor()
-        except AttributeError:
-            color = NSColor.controlTextColor()
+        color = menu_label_color(self._highlighted)
         NSString.stringWithString_(self._title).drawAtPoint_withAttributes_(
             (28, 2), menu_text_attrs(font, color)
+        )
+
+
+class LabelRowView(MenuRowView):
+    """Display-only menu row with hover highlighting."""
+
+    def initWithFrame_title_(self, frame, title):
+        self = objc.super(LabelRowView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._title = title
+        return self
+
+    def drawRect_(self, rect):
+        self._draw_highlight(rect)
+        font = NSFont.menuFontOfSize_(0)
+        color = menu_label_color(self._highlighted)
+        NSString.stringWithString_(self._title).drawAtPoint_withAttributes_(
+            (8, 2), menu_text_attrs(font, color)
         )
 
 
@@ -380,16 +453,39 @@ class ActionMenuItem:
         self._menuitem.setView_(self._view)
 
 
+class LabelMenuItem:
+    """View-based display-only menu row with hover highlighting."""
+
+    def __init__(self, title):
+        self.title = title
+        width = menu_row_width_for_title(title)
+        frame = NSMakeRect(0, 0, width, MENU_ROW_HEIGHT)
+        self._view = LabelRowView.alloc().initWithFrame_title_(frame, title)
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setView_(self._view)
+
+
+def menu_row_width_for_title(title, min_width=MENU_ROW_WIDTH, padding=24):
+    font = NSFont.menuFontOfSize_(0)
+    attrs = menu_text_attrs(font, NSColor.labelColor())
+    size = NSString.stringWithString_(title).sizeWithAttributes_(attrs)
+    return max(min_width, int(size.width) + padding)
+
+
 def expand_view_menu_items(submenu):
     """Stretch custom row views to the submenu width."""
     menu = submenu._menu
-    width = max(menu.size().width, MENU_ROW_WIDTH)
+    max_width = MENU_ROW_WIDTH
+    views = []
     for ns_item in menu.itemArray():
         view = ns_item.view()
         if view is None:
             continue
+        views.append(view)
+        max_width = max(max_width, view.frame().size.width)
+    for view in views:
         height = view.frame().size.height
-        view.setFrameSize_((width, height))
+        view.setFrameSize_((max_width, height))
 
 
 def format_group_line(group: dict, invasions_by_district: dict[str, dict]) -> str:
@@ -600,9 +696,10 @@ class InvasionTrackerApp(rumps.App):
 
         sorted_groups = sorted(visible, key=lambda g: (-g["members"], g["type"], g["district"]))
         submenu.update(
-            format_group_line(group, self.invasions_by_district)
+            LabelMenuItem(format_group_line(group, self.invasions_by_district))
             for group in sorted_groups
         )
+        expand_view_menu_items(submenu)
 
     def refresh_title_and_sections(self):
         online = f"{self.online_population} toons · " if self.online_population is not None else ""
