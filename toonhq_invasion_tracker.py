@@ -27,7 +27,7 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSMakeRect,
     NSMenuItem,
-    NSTrackingActiveInActiveApp,
+    NSTrackingActiveAlways,
     NSTrackingArea,
     NSTrackingEnabledDuringMouseDrag,
     NSTrackingInVisibleRect,
@@ -53,7 +53,7 @@ MENU_ROW_HEIGHT = 22
 MENU_ROW_WIDTH = 260
 MENU_TRACKING_OPTIONS = (
     NSTrackingMouseEnteredAndExited
-    | NSTrackingActiveInActiveApp
+    | NSTrackingActiveAlways
     | NSTrackingInVisibleRect
     | NSTrackingEnabledDuringMouseDrag
 )
@@ -301,6 +301,9 @@ class MenuRowView(NSView):
     def isFlipped(self):
         return True
 
+    def viewDidMoveToWindow(self):
+        self.updateTrackingAreas()
+
     def updateTrackingAreas(self):
         objc.super(MenuRowView, self).updateTrackingAreas()
         for area in self.trackingAreas():
@@ -324,9 +327,12 @@ class MenuRowView(NSView):
         if not self._highlighted:
             return
         try:
-            color = NSColor.selectedContentBackgroundColor()
-        except AttributeError:
             color = NSColor.selectedMenuItemColor()
+        except AttributeError:
+            try:
+                color = NSColor.selectedContentBackgroundColor()
+            except AttributeError:
+                color = NSColor.controlAccentColor()
         color.setFill()
         NSBezierPath.fillRect_(rect)
 
@@ -486,6 +492,7 @@ def expand_view_menu_items(submenu):
     for view in views:
         height = view.frame().size.height
         view.setFrameSize_((max_width, height))
+        view.updateTrackingAreas()
 
 
 def format_group_line(group: dict, invasions_by_district: dict[str, dict]) -> str:
@@ -530,6 +537,10 @@ class InvasionTrackerApp(rumps.App):
             rumps.MenuItem("Play Sound With Notifications", callback=self.toggle_sound),
         ]
         self.menu["Play Sound With Notifications"].state = self.config["play_sound"]
+        callAfter(self._expand_group_notifications_menu)
+
+    def _expand_group_notifications_menu(self):
+        expand_view_menu_items(self.menu[GROUP_NOTIFICATIONS_MENU])
 
     @rumps.timer(2)
     def startup_poll(self, timer):
@@ -669,11 +680,12 @@ class InvasionTrackerApp(rumps.App):
     def update_invasions_menu(self, status_line: str, invasions: list[dict]):
         submenu = self.menu["Active Invasions"]
         submenu.clear()
-        items = [status_line]
+        items = [LabelMenuItem(status_line)]
         if invasions:
             items.append(None)
-            items.extend(format_invasion_line(inv) for inv in invasions)
+            items.extend(LabelMenuItem(format_invasion_line(inv)) for inv in invasions)
         submenu.update(items)
+        expand_view_menu_items(submenu)
 
     def update_groups_menu(self, groups: list[dict], group_error: str | None):
         submenu = self.menu["Active Groups"]
