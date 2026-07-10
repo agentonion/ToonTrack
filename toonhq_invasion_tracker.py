@@ -27,11 +27,13 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSMakeRect,
     NSMenuItem,
+    NSPointInRect,
     NSTrackingActiveAlways,
     NSTrackingArea,
     NSTrackingEnabledDuringMouseDrag,
     NSTrackingInVisibleRect,
     NSTrackingMouseEnteredAndExited,
+    NSTrackingMouseMoved,
     NSView,
 )
 from Foundation import NSString
@@ -53,6 +55,7 @@ MENU_ROW_HEIGHT = 22
 MENU_ROW_WIDTH = 260
 MENU_TRACKING_OPTIONS = (
     NSTrackingMouseEnteredAndExited
+    | NSTrackingMouseMoved
     | NSTrackingActiveAlways
     | NSTrackingInVisibleRect
     | NSTrackingEnabledDuringMouseDrag
@@ -279,10 +282,7 @@ def menu_label_color(highlighted):
             return NSColor.selectedMenuItemTextColor()
         except AttributeError:
             return NSColor.alternateSelectedControlTextColor()
-    try:
-        return NSColor.labelColor()
-    except AttributeError:
-        return NSColor.controlTextColor()
+    return NSColor.controlTextColor()
 
 
 class MenuRowView(NSView):
@@ -321,6 +321,13 @@ class MenuRowView(NSView):
     def mouseExited_(self, event):
         self._highlighted = False
         self.setNeedsDisplay_(True)
+
+    def mouseMoved_(self, event):
+        location = self.convertPoint_fromView_(event.locationInWindow(), None)
+        inside = NSPointInRect(location, self.bounds())
+        if inside != self._highlighted:
+            self._highlighted = inside
+            self.setNeedsDisplay_(True)
 
     @objc.python_method
     def _draw_highlight(self, rect):
@@ -430,7 +437,7 @@ class CheckboxMenuItem:
             frame, title, checked, self._on_toggle if callback else None
         )
         self._menuitem = NSMenuItem.alloc().init()
-        self._menuitem.setView_(self._view)
+        attach_view_menu_item(self._menuitem, self._view, title)
 
     @objc.python_method
     def _on_toggle(self, checked):
@@ -456,7 +463,7 @@ class ActionMenuItem:
             frame, title, callback
         )
         self._menuitem = NSMenuItem.alloc().init()
-        self._menuitem.setView_(self._view)
+        attach_view_menu_item(self._menuitem, self._view, title)
 
 
 class LabelMenuItem:
@@ -468,12 +475,18 @@ class LabelMenuItem:
         frame = NSMakeRect(0, 0, width, MENU_ROW_HEIGHT)
         self._view = LabelRowView.alloc().initWithFrame_title_(frame, title)
         self._menuitem = NSMenuItem.alloc().init()
-        self._menuitem.setView_(self._view)
+        attach_view_menu_item(self._menuitem, self._view, title)
+
+
+def attach_view_menu_item(menuitem, view, title):
+    menuitem.setView_(view)
+    menuitem.setTitle_(title)
+    menuitem.setEnabled_(True)
 
 
 def menu_row_width_for_title(title, min_width=MENU_ROW_WIDTH, padding=24):
     font = NSFont.menuFontOfSize_(0)
-    attrs = menu_text_attrs(font, NSColor.labelColor())
+    attrs = menu_text_attrs(font, NSColor.controlTextColor())
     size = NSString.stringWithString_(title).sizeWithAttributes_(attrs)
     return max(min_width, int(size.width) + padding)
 
