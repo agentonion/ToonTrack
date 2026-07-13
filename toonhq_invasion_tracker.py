@@ -36,7 +36,7 @@ from AppKit import (
     NSTrackingMouseMoved,
     NSView,
 )
-from Foundation import NSDate, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSObject
+from Foundation import NSAttributedString, NSDate, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSObject
 from PyObjCTools.AppHelper import callAfter
 
 API_URL = "https://www.toontownrewritten.com/api/invasions"
@@ -52,10 +52,14 @@ INVASION_TIMER_INTERVAL = 1
 USER_AGENT = "ToonTrack/1.0 (macOS menu bar invasion & group tracker)"
 MENU_EMOJI = "👀"
 GROUP_NOTIFICATIONS_MENU = "Group Notifications…"
+INVASION_NOTIFICATIONS_MENU = "Invasion Notifications…"
 INVASIONS_MENU = "Invasions"
 GROUPS_MENU = "Groups"
 MENU_ROW_HEIGHT = 22
 MENU_ROW_WIDTH = 260
+MENU_CHECKMARK_X = 8
+MENU_PLAIN_TEXT_X = 19
+MENU_CHECKBOX_TEXT_X = 28
 MENU_TRACKING_OPTIONS = (
     NSTrackingMouseEnteredAndExited
     | NSTrackingMouseMoved
@@ -89,12 +93,107 @@ COG_SUITS = {
 COG_TO_SUIT = {
     cog: suit for suit, cogs in COG_SUITS.items() for cog in cogs
 }
+ALL_COGS = [cog for cogs in COG_SUITS.values() for cog in cogs]
+
+
+def format_suit_menu_title(suit: str, muted: set[str]) -> str:
+    selected = sum(1 for cog in COG_SUITS[suit] if cog not in muted)
+    return f"{suit} ({selected})"
 
 DEFAULT_CONFIG = {
     "muted_group_types": [],
+    "muted_invasion_cogs": [],
     "show_all_groups": False,
+    "show_all_invasions": False,
+    "notifications_enabled": True,
     "play_sound": True,
 }
+
+# UserNotifications is required for bundled .app builds on modern macOS.
+# Terminal runs can still fall back to rumps' legacy NSUserNotification API.
+try:
+    from UserNotifications import (
+        UNAuthorizationOptionAlert,
+        UNAuthorizationOptionSound,
+        UNMutableNotificationContent,
+        UNNotificationRequest,
+        UNNotificationSound,
+        UNUserNotificationCenter,
+    )
+
+    _HAS_USER_NOTIFICATIONS = True
+except ImportError:
+    _HAS_USER_NOTIFICATIONS = False
+
+_UN_CENTER = None
+_UN_AUTHORIZED = None
+
+if _HAS_USER_NOTIFICATIONS:
+    _UN_CENTER = UNUserNotificationCenter.currentNotificationCenter()
+
+
+def setup_user_notifications():
+    """Request notification permission once NSApplication is running."""
+    global _UN_AUTHORIZED
+    if not _HAS_USER_NOTIFICATIONS or _UN_CENTER is None:
+        return
+    options = UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+
+    def on_settings(settings):
+        global _UN_AUTHORIZED
+        status = settings.authorizationStatus()
+        if status == 2:
+            _UN_AUTHORIZED = True
+        elif status == 1:
+            _UN_AUTHORIZED = False
+
+    def on_auth(granted, _error):
+        global _UN_AUTHORIZED
+        if granted:
+            _UN_AUTHORIZED = True
+
+    _UN_CENTER.getNotificationSettingsWithCompletionHandler_(on_settings)
+    _UN_CENTER.requestAuthorizationWithOptions_completionHandler_(options, on_auth)
+
+
+def deliver_notification(title, subtitle, message, *, sound=True):
+    """Send a notification via UserNotifications when available, else rumps."""
+    if _HAS_USER_NOTIFICATIONS and _UN_CENTER is not None:
+        content = UNMutableNotificationContent.alloc().init()
+        content.setTitle_(title or "ToonTrack")
+        content.setSubtitle_(subtitle or "")
+        content.setBody_(message or "")
+        if sound:
+            content.setSound_(UNNotificationSound.defaultSound())
+        request = UNNotificationRequest.requestWithIdentifier_content_trigger_(
+            f"toontrack-{time.time_ns()}",
+            content,
+            None,
+        )
+
+        def on_complete(error):
+            if error is not None:
+                rumps.notification(
+                    title=title,
+                    subtitle=subtitle,
+                    message=message,
+                    sound=sound,
+                )
+
+        _UN_CENTER.addNotificationRequest_withCompletionHandler_(request, on_complete)
+        return
+
+    rumps.notification(
+        title=title,
+        subtitle=subtitle,
+        message=message,
+        sound=sound,
+    )
+
+
+@rumps.events.before_start
+def _init_notifications_at_launch():
+    setup_user_notifications()
 
 
 def load_config():
@@ -287,11 +386,23 @@ def format_invasion_line(inv: dict) -> str:
     )
 
 
+def menu_font():
+    return NSFont.menuFontOfSize_(0)
+
+
 def menu_text_attrs(font, color):
     return {
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: color,
     }
+
+
+def set_native_menu_title(menu_item, title):
+    """Apply the standard menu font to a native rumps menu item title."""
+    attrs = menu_text_attrs(menu_font(), NSColor.controlTextColor())
+    menu_item._menuitem.setAttributedTitle_(
+        NSAttributedString.alloc().initWithString_attributes_(title, attrs)
+    )
 
 
 def menu_label_color(highlighted):
@@ -391,14 +502,16 @@ class CheckboxRowView(MenuRowView):
 
     def drawRect_(self, rect):
         self._draw_highlight(rect)
-        font = NSFont.menuFontOfSize_(0)
+        font = menu_font()
         color = menu_label_color(self._highlighted)
         attrs = menu_text_attrs(font, color)
         if self._checked:
-            mark_attrs = dict(attrs)
-            mark_attrs[NSFontAttributeName] = NSFont.boldSystemFontOfSize_(font.pointSize())
-            NSString.stringWithString_("✓").drawAtPoint_withAttributes_((8, 2), mark_attrs)
-        NSString.stringWithString_(self._title).drawAtPoint_withAttributes_((28, 2), attrs)
+            NSString.stringWithString_("✓").drawAtPoint_withAttributes_(
+                (MENU_CHECKMARK_X, 2), attrs
+            )
+        NSString.stringWithString_(self._title).drawAtPoint_withAttributes_(
+            (MENU_CHECKBOX_TEXT_X, 2), attrs
+        )
 
 
 class ActionRowView(MenuRowView):
@@ -413,15 +526,22 @@ class ActionRowView(MenuRowView):
         return self
 
     def mouseUp_(self, event):
+        self._activate()
+
+    def mouseDown_(self, event):
+        self._activate()
+
+    @objc.python_method
+    def _activate(self):
         if self._handler:
             self._handler()
 
     def drawRect_(self, rect):
         self._draw_highlight(rect)
-        font = NSFont.menuFontOfSize_(0)
+        font = menu_font()
         color = menu_label_color(self._highlighted)
         NSString.stringWithString_(self._title).drawAtPoint_withAttributes_(
-            (28, 2), menu_text_attrs(font, color)
+            (MENU_PLAIN_TEXT_X, 2), menu_text_attrs(font, color)
         )
 
 
@@ -437,10 +557,10 @@ class LabelRowView(MenuRowView):
 
     def drawRect_(self, rect):
         self._draw_highlight(rect)
-        font = NSFont.menuFontOfSize_(0)
+        font = menu_font()
         color = menu_label_color(self._highlighted)
         NSString.stringWithString_(self._title).drawAtPoint_withAttributes_(
-            (8, 2), menu_text_attrs(font, color)
+            (MENU_PLAIN_TEXT_X, 2), menu_text_attrs(font, color)
         )
 
 
@@ -476,7 +596,8 @@ class CheckboxMenuItem:
     def __init__(self, title, checked=False, callback=None):
         self.title = title
         self._callback = callback
-        frame = NSMakeRect(0, 0, MENU_ROW_WIDTH, MENU_ROW_HEIGHT)
+        width = menu_row_width_for_title(title, checkbox=True)
+        frame = NSMakeRect(0, 0, width, MENU_ROW_HEIGHT)
         self._view = CheckboxRowView.alloc().initWithFrame_title_checked_handler_(
             frame, title, checked, self._on_toggle if callback else None
         )
@@ -502,9 +623,16 @@ class ActionMenuItem:
 
     def __init__(self, title, callback=None):
         self.title = title
-        frame = NSMakeRect(0, 0, MENU_ROW_WIDTH, MENU_ROW_HEIGHT)
+        self._callback = callback
+
+        @objc.python_method
+        def handler():
+            if self._callback is not None:
+                self._callback()
+
+        frame = NSMakeRect(0, 0, menu_row_width_for_title(title), MENU_ROW_HEIGHT)
         self._view = ActionRowView.alloc().initWithFrame_title_handler_(
-            frame, title, callback
+            frame, title, handler
         )
         self._menuitem = NSMenuItem.alloc().init()
         attach_view_menu_item(self._menuitem, self._view, title)
@@ -529,6 +657,7 @@ class LabelMenuItem:
         self._view.setFrameSize_((width, MENU_ROW_HEIGHT))
         self._menuitem.setTitle_(title)
         self._view.setNeedsDisplay_(True)
+        self._view.updateTrackingAreas()
 
 
 def attach_view_menu_item(menuitem, view, title):
@@ -537,11 +666,12 @@ def attach_view_menu_item(menuitem, view, title):
     menuitem.setEnabled_(True)
 
 
-def menu_row_width_for_title(title, min_width=MENU_ROW_WIDTH, padding=24):
-    font = NSFont.menuFontOfSize_(0)
+def menu_row_width_for_title(title, min_width=MENU_ROW_WIDTH, padding=16, checkbox=False):
+    font = menu_font()
     attrs = menu_text_attrs(font, NSColor.controlTextColor())
     size = NSString.stringWithString_(title).sizeWithAttributes_(attrs)
-    return max(min_width, int(size.width) + padding)
+    text_x = MENU_CHECKBOX_TEXT_X if checkbox else MENU_PLAIN_TEXT_X
+    return max(min_width, int(text_x + size.width + padding))
 
 
 def expand_view_menu_items(submenu):
@@ -602,9 +732,13 @@ class InvasionTrackerApp(rumps.App):
         self.groups_core_data = None
         self.known_group_types = []
         self.group_type_items = {}
+        self.invasion_cog_items = {}
+        self.invasion_suit_menus = {}
         self.show_all_item = None
+        self.show_all_invasions_item = None
         self.invasions_by_district = {}
         self.all_groups_count = 0
+        self.all_invasions_count = 0
         self.population_unavailable = False
         self.last_updated = None
         self.invasion_error = None
@@ -612,26 +746,68 @@ class InvasionTrackerApp(rumps.App):
         self._invasion_tick_target = InvasionTickTarget.alloc().initWithApp_(self)
         self._invasion_live_timer = None
         self.group_type_menu = self.build_group_type_menu()
+        self.invasion_cog_menu = self.build_invasion_cog_menu()
 
-        self.population_item = rumps.MenuItem("Checking toons online…", callback=None)
-        self.updated_item = rumps.MenuItem("Updated —", callback=None)
+        self.population_item = LabelMenuItem("Checking toons online…")
+        self.updated_item = LabelMenuItem("Updated —")
+        self.notifications_item = CheckboxMenuItem(
+            "Notifications",
+            checked=self.config.get("notifications_enabled", True),
+            callback=self.toggle_notifications,
+        )
+        self.play_sound_item = CheckboxMenuItem(
+            "Play Sound With Notifications",
+            checked=self.config["play_sound"],
+            callback=self.toggle_sound,
+        )
         self.menu = [
             self.population_item,
             self.updated_item,
             None,
-            (INVASIONS_MENU, ["Checking…"]),
-            (GROUPS_MENU, ["Checking…"]),
-            None,
-            rumps.MenuItem("Refresh Now", callback=self.manual_refresh),
+            (INVASIONS_MENU, [LabelMenuItem("Checking…")]),
+            (GROUPS_MENU, [LabelMenuItem("Checking…")]),
             None,
             (GROUP_NOTIFICATIONS_MENU, self.group_type_menu),
-            rumps.MenuItem("Play Sound With Notifications", callback=self.toggle_sound),
+            (INVASION_NOTIFICATIONS_MENU, self.invasion_cog_menu),
+            None,
+            self.notifications_item,
+            self.play_sound_item,
         ]
-        self.menu["Play Sound With Notifications"].state = self.config["play_sound"]
+        callAfter(self._expand_root_menu_items)
         callAfter(self._expand_group_notifications_menu)
+        callAfter(self._expand_invasion_notifications_menu)
+        callAfter(self._cache_invasion_suit_menus)
+        callAfter(self._apply_uniform_menu_fonts)
+
+    def _expand_root_menu_items(self):
+        expand_view_menu_items(self.menu)
+
+    def _apply_uniform_menu_fonts(self):
+        for key in (
+            INVASIONS_MENU,
+            GROUPS_MENU,
+            GROUP_NOTIFICATIONS_MENU,
+            INVASION_NOTIFICATIONS_MENU,
+        ):
+            if key in self.menu:
+                set_native_menu_title(self.menu[key], self.menu[key].title)
+
+    def _cache_invasion_suit_menus(self):
+        submenu = self.menu[INVASION_NOTIFICATIONS_MENU]
+        for suit in COG_SUITS:
+            if suit in submenu:
+                self.invasion_suit_menus[suit] = submenu[suit]
+        self.refresh_invasion_suit_titles()
 
     def _expand_group_notifications_menu(self):
         expand_view_menu_items(self.menu[GROUP_NOTIFICATIONS_MENU])
+
+    def _expand_invasion_notifications_menu(self):
+        submenu = self.menu[INVASION_NOTIFICATIONS_MENU]
+        expand_view_menu_items(submenu)
+        for suit in COG_SUITS:
+            if suit in submenu:
+                expand_view_menu_items(submenu[suit])
 
     @rumps.timer(2)
     def startup_poll(self, timer):
@@ -684,7 +860,7 @@ class InvasionTrackerApp(rumps.App):
             ActionMenuItem("Select All", callback=self.select_all_group_types),
             ActionMenuItem("Unselect All", callback=self.unselect_all_group_types),
             None,
-            rumps.MenuItem("(loads on first refresh)", callback=None),
+            LabelMenuItem("(loads on first refresh)"),
         ]
 
     def rebuild_group_type_menu(self):
@@ -719,6 +895,35 @@ class InvasionTrackerApp(rumps.App):
         submenu.update(items)
         expand_view_menu_items(submenu)
         self.group_type_menu = items
+
+    def build_invasion_cog_menu(self):
+        muted = set(self.config.get("muted_invasion_cogs") or [])
+        show_all = self.config.get("show_all_invasions", False)
+        self.show_all_invasions_item = CheckboxMenuItem(
+            "Show All Invasions",
+            checked=show_all,
+            callback=self.on_show_all_invasions_changed,
+        )
+        items = [
+            self.show_all_invasions_item,
+            None,
+            ActionMenuItem("Select All", callback=self.select_all_invasion_cogs),
+            ActionMenuItem("Unselect All", callback=self.unselect_all_invasion_cogs),
+            None,
+        ]
+        self.invasion_cog_items = {}
+        for suit, cogs in COG_SUITS.items():
+            suit_items = []
+            for cog_name in cogs:
+                item = CheckboxMenuItem(
+                    cog_name,
+                    checked=cog_name not in muted,
+                    callback=self.make_invasion_cog_changed(cog_name),
+                )
+                self.invasion_cog_items[cog_name] = item
+                suit_items.append(item)
+            items.append((suit, suit_items))
+        return items
 
     def make_group_type_changed(self, type_name):
         def _changed(_item, checked):
@@ -760,48 +965,111 @@ class InvasionTrackerApp(rumps.App):
         self.refresh_group_type_checkmarks()
         self.schedule_redisplay_groups()
 
+    def make_invasion_cog_changed(self, cog_name):
+        def _changed(_item, checked):
+            self.on_invasion_cog_changed(cog_name, checked)
+        return _changed
+
+    def on_invasion_cog_changed(self, cog_name: str, checked: bool):
+        muted = set(self.config.get("muted_invasion_cogs") or [])
+        if checked:
+            muted.discard(cog_name)
+        else:
+            muted.add(cog_name)
+        self.config["muted_invasion_cogs"] = sorted(muted)
+        save_config(self.config)
+        self.refresh_invasion_cog_checkmarks()
+        self.schedule_redisplay_invasions()
+
+    def on_show_all_invasions_changed(self, _item, checked: bool):
+        self.config["show_all_invasions"] = checked
+        save_config(self.config)
+        self.schedule_redisplay_invasions()
+
+    def refresh_invasion_suit_titles(self):
+        muted = set(self.config.get("muted_invasion_cogs") or [])
+        for suit, suit_menu in self.invasion_suit_menus.items():
+            set_native_menu_title(suit_menu, format_suit_menu_title(suit, muted))
+
+    def refresh_invasion_cog_checkmarks(self):
+        muted = set(self.config.get("muted_invasion_cogs") or [])
+        show_all = self.config.get("show_all_invasions", False)
+        if self.show_all_invasions_item is not None:
+            self.show_all_invasions_item.state = show_all
+        for cog_name, item in self.invasion_cog_items.items():
+            item.state = cog_name not in muted
+            item._view.setNeedsDisplay_(True)
+        self.refresh_invasion_suit_titles()
+
+    def select_all_invasion_cogs(self, _sender=None):
+        self.config["muted_invasion_cogs"] = []
+        save_config(self.config)
+        self.refresh_invasion_cog_checkmarks()
+        self.schedule_redisplay_invasions()
+
+    def unselect_all_invasion_cogs(self, _sender=None):
+        self.config["muted_invasion_cogs"] = ALL_COGS[:]
+        save_config(self.config)
+        self.refresh_invasion_cog_checkmarks()
+        self.schedule_redisplay_invasions()
+
     def schedule_redisplay_groups(self):
         """Update Groups after the menu finishes handling the click."""
         callAfter(self.redisplay_groups)
 
+    def schedule_redisplay_invasions(self):
+        """Update Invasions after the menu finishes handling the click."""
+        callAfter(self.redisplay_invasions)
+
     def group_notifications_enabled(self, type_name: str) -> bool:
         return type_name not in set(self.config.get("muted_group_types") or [])
+
+    def invasion_notifications_enabled(self, raw_cog_name: str) -> bool:
+        return base_cog_name(raw_cog_name) not in set(self.config.get("muted_invasion_cogs") or [])
 
     def filter_groups_for_display(self, groups: list[dict]) -> list[dict]:
         if self.config.get("show_all_groups"):
             return groups
         return [g for g in groups if self.group_notifications_enabled(g["type"])]
 
+    def filter_invasions_for_display(self, invasions: list[dict]) -> list[dict]:
+        if self.config.get("show_all_invasions"):
+            return invasions
+        return [inv for inv in invasions if self.invasion_notifications_enabled(inv["type"])]
+
     def redisplay_groups(self):
         if self.active_groups:
             self.update_groups_menu(list(self.active_groups.values()), None)
             self.refresh_title_and_sections()
 
+    def redisplay_invasions(self):
+        if self.invasion_display is not None:
+            self.update_invasions_menu(self.invasion_display, self.invasion_error)
+            self.refresh_title_and_sections()
+
     # ---------- callbacks ----------
 
-    def toggle_sound(self, sender):
-        sender.state = not sender.state
-        self.config["play_sound"] = sender.state
+    def toggle_notifications(self, _item, checked):
+        self.config["notifications_enabled"] = checked
         save_config(self.config)
 
-    def manual_refresh(self, sender):
-        self.poll_groups()
-        self.poll_invasions()
-
-    # ---------- display helpers ----------
+    def toggle_sound(self, _item, checked):
+        self.config["play_sound"] = checked
+        save_config(self.config)
 
     def update_status_menu(self):
         if self.online_population is not None:
-            self.population_item.title = f"{self.online_population:,} toons online"
+            self.population_item.set_title(f"{self.online_population:,} toons online")
         elif self.population_unavailable:
-            self.population_item.title = "Toons online unavailable"
+            self.population_item.set_title("Toons online unavailable")
         else:
-            self.population_item.title = "Checking toons online…"
+            self.population_item.set_title("Checking toons online…")
 
         if self.last_updated:
-            self.updated_item.title = f"Updated {self.last_updated}"
+            self.updated_item.set_title(f"Updated {self.last_updated}")
         else:
-            self.updated_item.title = "Updated —"
+            self.updated_item.set_title("Updated —")
+        expand_view_menu_items(self.menu)
 
     def menu_bar_online(self) -> str:
         if self.online_population is not None:
@@ -815,23 +1083,35 @@ class InvasionTrackerApp(rumps.App):
             f"Groups ({self.group_count}) "
             f"Invasion ({self.invasion_count})"
         )
-        self.menu[INVASIONS_MENU].title = f"Invasions ({self.invasion_count})"
-        self.menu[GROUPS_MENU].title = f"Groups ({self.group_count})"
+        set_native_menu_title(self.menu[INVASIONS_MENU], f"Invasions ({self.invasion_count})")
+        set_native_menu_title(self.menu[GROUPS_MENU], f"Groups ({self.group_count})")
 
     def update_invasions_menu(self, invasions: list[dict], invasion_error: str | None = None):
         submenu = self.menu[INVASIONS_MENU]
         submenu.clear()
         self.invasion_menu_items = {}
         if invasion_error:
+            self.invasion_count = 0
             submenu.update([LabelMenuItem(f"Unavailable ({invasion_error})")])
         elif invasions:
-            items = []
-            for inv in invasions:
-                item = InvasionMenuItem(inv)
-                self.invasion_menu_items[inv["district"]] = item
-                items.append(item)
-            submenu.update(items)
+            self.all_invasions_count = len(invasions)
+            visible = self.filter_invasions_for_display(invasions)
+            self.invasion_count = len(visible)
+            if not visible:
+                if not self.config.get("show_all_invasions"):
+                    submenu.update([LabelMenuItem("(no invasions match your selected cogs)")])
+                else:
+                    submenu.update([LabelMenuItem("(none active)")])
+            else:
+                items = []
+                for inv in visible:
+                    item = InvasionMenuItem(inv)
+                    self.invasion_menu_items[inv["district"]] = item
+                    items.append(item)
+                submenu.update(items)
         else:
+            self.all_invasions_count = 0
+            self.invasion_count = 0
             submenu.update([LabelMenuItem("(none active)")])
         expand_view_menu_items(submenu)
 
@@ -840,7 +1120,7 @@ class InvasionTrackerApp(rumps.App):
         submenu.clear()
 
         if group_error:
-            submenu.update([f"Unavailable ({group_error})"])
+            submenu.update([LabelMenuItem(f"Unavailable ({group_error})")])
             return
 
         self.all_groups_count = len(groups)
@@ -849,9 +1129,9 @@ class InvasionTrackerApp(rumps.App):
 
         if not visible:
             if groups and not self.config.get("show_all_groups"):
-                submenu.update(["(no groups match your selected types)"])
+                submenu.update([LabelMenuItem("(no groups match your selected types)")])
             else:
-                submenu.update(["(none listed)"])
+                submenu.update([LabelMenuItem("(none listed)")])
             return
 
         sorted_groups = sorted(visible, key=lambda g: (-g["members"], g["type"], g["district"]))
@@ -988,7 +1268,7 @@ class InvasionTrackerApp(rumps.App):
 
         previous_invasions = self.active_invasions
         for district, raw_cog in current_invasions.items():
-            if district not in previous_invasions:
+            if district not in previous_invasions and self.invasion_notifications_enabled(raw_cog):
                 detail = next(d for d in invasion_display if d["district"] == district)
                 eta = format_eta(detail.get("eta_seconds"))
                 suit = detail.get("suit", cog_suit(raw_cog))
@@ -1000,7 +1280,6 @@ class InvasionTrackerApp(rumps.App):
 
         self.active_invasions = current_invasions
         self.invasion_display = invasion_display
-        self.invasion_count = len(current_invasions) if not invasion_error else 0
         self.invasions_by_district = {
             inv["district"]: inv for inv in invasion_display
         }
@@ -1023,10 +1302,12 @@ class InvasionTrackerApp(rumps.App):
             self.refresh_title_and_sections()
 
     def notify(self, title, subtitle, message):
-        rumps.notification(
-            title=title,
-            subtitle=subtitle,
-            message=message,
+        if not self.config.get("notifications_enabled", True):
+            return
+        deliver_notification(
+            title,
+            subtitle,
+            message,
             sound=self.config.get("play_sound", True),
         )
 
