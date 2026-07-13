@@ -10,7 +10,7 @@ from setuptools import setup
 APP = ["toonhq_invasion_tracker.py"]
 OPTIONS = {
     "argv_emulation": False,
-    "packages": ["rumps", "requests"],
+    "packages": ["rumps", "requests", "UserNotifications"],
     "plist": {
         "CFBundleName": "ToonTrack",
         "CFBundleDisplayName": "ToonTrack",
@@ -18,6 +18,7 @@ OPTIONS = {
         "CFBundleVersion": "1.2.3",
         "CFBundleShortVersionString": "1.2.3",
         "LSUIElement": True,
+        "NSUserNotificationAlertStyle": "alert",
         "NSHumanReadableCopyright": "Unofficial fan tool — not affiliated with Toontown Rewritten or ToonHQ.",
     },
 }
