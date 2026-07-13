@@ -2,6 +2,8 @@
 
 A macOS menu bar app that tracks [Toontown Rewritten](https://www.toontownrewritten.com/) invasions and ToonHQ groups, with notifications when new invasions or groups appear.
 
+**ToonRescue** — see [`toonrescue/`](toonrescue/) for the mobile-friendly SOS Toon guide web app ([toonrescue.com](https://toonrescue.com)).
+
 Uses TTR's official APIs for invasions and population, and ToonHQ's live groups API (`/api/groups/list/1/`).
 
 ## Quick start

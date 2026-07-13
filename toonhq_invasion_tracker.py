@@ -36,7 +36,7 @@ from AppKit import (
     NSTrackingMouseMoved,
     NSView,
 )
-from Foundation import NSString
+from Foundation import NSDate, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSObject
 from PyObjCTools.AppHelper import callAfter
 
 API_URL = "https://www.toontownrewritten.com/api/invasions"
@@ -48,6 +48,7 @@ TOONHQ_GROUPS_CORE_URL = "https://toonhq.org/api/groups/core_data/1/"
 CONFIG_PATH = Path.home() / ".toonhq_tracker" / "config.json"
 GROUPS_POLL_INTERVAL = 12
 INVASIONS_POLL_INTERVAL = 30
+INVASION_TIMER_INTERVAL = 1
 USER_AGENT = "ToonTrack/1.0 (macOS menu bar invasion & group tracker)"
 MENU_EMOJI = "👀"
 GROUP_NOTIFICATIONS_MENU = "Group Notifications…"
@@ -138,14 +139,29 @@ def parse_progress(progress: str) -> tuple[int, int] | None:
 def format_eta(seconds: float | None) -> str:
     if seconds is None or seconds <= 0:
         return "?"
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes, secs = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}m {secs:02d}s" if secs else f"{minutes}m"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h {minutes:02d}m"
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    return f"{minutes}m {secs:02d}s"
+
+
+def live_eta_seconds(inv: dict, now: float | None = None) -> float | None:
+    if now is None:
+        now = time.time()
+    deadline = inv.get("eta_deadline")
+    if deadline is not None:
+        return max(deadline - now, 0)
+    eta = inv.get("eta_seconds")
+    if eta is None:
+        return None
+    as_of = inv.get("eta_as_of")
+    if as_of is None:
+        return eta
+    return max(eta - (now - as_of), 0)
 
 
 def estimate_eta(defeated: int, total: int, as_of: int, history: list) -> float | None:
@@ -263,7 +279,7 @@ def parse_toonhq_invasions(state: dict) -> dict[str, dict]:
 
 def format_invasion_line(inv: dict) -> str:
     pct = int((inv["defeated"] / inv["total"]) * 100) if inv["total"] else 0
-    eta = format_eta(inv.get("eta_seconds"))
+    eta = format_eta(live_eta_seconds(inv))
     suit = inv.get("suit", cog_suit(inv["type"]))
     return (
         f"{inv['district']} · {suit} · {inv['type']} · {eta} left · "
@@ -428,6 +444,32 @@ class LabelRowView(MenuRowView):
         )
 
 
+class InvasionMenuItem:
+    """Live-updating invasion row with the same custom-drawn text style as Groups."""
+
+    def __init__(self, invasion: dict):
+        self.invasion = invasion
+        self.district = invasion["district"]
+        self.title = format_invasion_line(invasion)
+        width = menu_row_width_for_title(self.title)
+        frame = NSMakeRect(0, 0, width, MENU_ROW_HEIGHT)
+        self._view = LabelRowView.alloc().initWithFrame_title_(frame, self.title)
+        self._menuitem = NSMenuItem.alloc().init()
+        attach_view_menu_item(self._menuitem, self._view, self.title)
+
+    @objc.python_method
+    def refresh(self):
+        title = format_invasion_line(self.invasion)
+        self.title = title
+        self._view._title = title
+        width = menu_row_width_for_title(title)
+        self._view.setFrameSize_((width, MENU_ROW_HEIGHT))
+        self._menuitem.setTitle_(title)
+        self._view.setNeedsDisplay_(True)
+        if self._view.window() is not None:
+            self._view.display()
+
+
 class CheckboxMenuItem:
     """View-based menu item with a checkmark; stays open while toggling."""
 
@@ -532,6 +574,20 @@ def format_group_line(group: dict, invasions_by_district: dict[str, dict]) -> st
     )
 
 
+class InvasionTickTarget(NSObject):
+    """Fires invasion countdown refreshes while menus are open (common run loop modes)."""
+
+    def initWithApp_(self, app):
+        self = objc.super(InvasionTickTarget, self).init()
+        if self is None:
+            return None
+        self._app = app
+        return self
+
+    def invasionTick_(self, _timer):
+        self._app._refresh_invasion_timer_views()
+
+
 class InvasionTrackerApp(rumps.App):
     def __init__(self):
         super().__init__("ToonTrack", title=f"{MENU_EMOJI} Loading…")
@@ -552,6 +608,9 @@ class InvasionTrackerApp(rumps.App):
         self.population_unavailable = False
         self.last_updated = None
         self.invasion_error = None
+        self.invasion_menu_items = {}
+        self._invasion_tick_target = InvasionTickTarget.alloc().initWithApp_(self)
+        self._invasion_live_timer = None
         self.group_type_menu = self.build_group_type_menu()
 
         self.population_item = rumps.MenuItem("Checking toons online…", callback=None)
@@ -577,8 +636,23 @@ class InvasionTrackerApp(rumps.App):
     @rumps.timer(2)
     def startup_poll(self, timer):
         timer.stop()
+        self._start_invasion_live_timer()
         self.poll_groups()
         self.poll_invasions()
+
+    def _start_invasion_live_timer(self):
+        if self._invasion_live_timer is not None:
+            return
+        timer = NSTimer.alloc().initWithFireDate_interval_target_selector_userInfo_repeats_(
+            NSDate.date(),
+            INVASION_TIMER_INTERVAL,
+            self._invasion_tick_target,
+            "invasionTick:",
+            None,
+            True,
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
+        self._invasion_live_timer = timer
 
     @rumps.timer(GROUPS_POLL_INTERVAL)
     def auto_groups_poll(self, _):
@@ -587,6 +661,13 @@ class InvasionTrackerApp(rumps.App):
     @rumps.timer(INVASIONS_POLL_INTERVAL)
     def auto_invasions_poll(self, _):
         self.poll_invasions()
+
+    @objc.python_method
+    def _refresh_invasion_timer_views(self):
+        if self.invasion_error or not self.invasion_menu_items:
+            return
+        for item in self.invasion_menu_items.values():
+            item.refresh()
 
     # ---------- menu construction ----------
 
@@ -740,10 +821,16 @@ class InvasionTrackerApp(rumps.App):
     def update_invasions_menu(self, invasions: list[dict], invasion_error: str | None = None):
         submenu = self.menu[INVASIONS_MENU]
         submenu.clear()
+        self.invasion_menu_items = {}
         if invasion_error:
             submenu.update([LabelMenuItem(f"Unavailable ({invasion_error})")])
         elif invasions:
-            submenu.update(LabelMenuItem(format_invasion_line(inv)) for inv in invasions)
+            items = []
+            for inv in invasions:
+                item = InvasionMenuItem(inv)
+                self.invasion_menu_items[inv["district"]] = item
+                items.append(item)
+            submenu.update(items)
         else:
             submenu.update([LabelMenuItem("(none active)")])
         expand_view_menu_items(submenu)
@@ -879,6 +966,7 @@ class InvasionTrackerApp(rumps.App):
             if eta_seconds is None and progress:
                 eta_seconds = estimate_eta(defeated, total, as_of, history[:-1] if history else [])
 
+            now = time.time()
             invasion_display.append({
                 "district": district,
                 "type": raw_cog,
@@ -886,12 +974,14 @@ class InvasionTrackerApp(rumps.App):
                 "defeated": defeated,
                 "total": total,
                 "eta_seconds": eta_seconds,
+                "eta_as_of": int(now) if eta_seconds is not None else None,
+                "eta_deadline": now + eta_seconds if eta_seconds is not None else None,
             })
             current_invasions[district] = raw_cog
 
         invasion_display.sort(
             key=lambda inv: (
-                inv["eta_seconds"] if inv["eta_seconds"] is not None else float("inf"),
+                live_eta_seconds(inv) if inv["eta_seconds"] is not None else float("inf"),
                 inv["district"],
             )
         )
@@ -919,6 +1009,7 @@ class InvasionTrackerApp(rumps.App):
         self.last_updated = time.strftime("%I:%M:%S %p")
 
         self.update_invasions_menu(invasion_display, invasion_error)
+        self._start_invasion_live_timer()
 
         # Refresh group lines so invasion tags stay in sync with districts.
         if self.active_groups and not invasion_error:

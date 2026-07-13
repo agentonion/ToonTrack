@@ -2,6 +2,14 @@
 
 All notable changes to ToonTrack are documented here.
 
+## [1.2.3] — 2026-07-13
+
+### Fixed
+- Invasion timers now count down live in the menu (1-second refresh while open)
+- Invasion row text uses the same custom-drawn black style as Groups (no grey inactive menu text)
+
+*Wave fixed the bugs: invasion grey text and non-live invasion timers.*
+
 ## [1.2.2] — 2026-07-10
 
 ### Changed
